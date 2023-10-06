@@ -57,7 +57,7 @@ initialGuess frequency1 frequency2 = zip (sortedChars frequency1) (sortedChars f
 chiSquared :: FrequencyTable -> FrequencyTable -> Double
 chiSquared model observation =
     sum [((oFreq - eFreq) ^ 2) / eFreq | (oChar, oFreq) <- observation, 
-        let eFreq = fromMaybe (1/10000) (lookup oChar model)] -- if the expected frequency of a symbol is 0, we use a factor 1/10000.
+    let eFreq = fromMaybe (1/10000) (lookup oChar model)] -- if the expected frequency of a symbol is 0, we use a factor 1/10000.
 
 -- Exercise3
 -- a/b) implement swapEntries. This funciton takes two pairs and swaps two substitutions within a key
@@ -104,7 +104,7 @@ greedyDict dict cipherText key =
     let neighbours = [(k, countValidWords dict (decode k cipherText)) | k <- neighbourKeys key] --creates a list of pairs where each pair consists of a key k.
         maxNeighbour = fst $ List.maximumBy (Ord.comparing snd) neighbours
     in if countValidWords dict (decode key cipherText) < countValidWords dict (decode maxNeighbour cipherText)
-        then greedyDict dict cipherText bestNeighbor else key -- Recursively calls itself until with the maxNeighour as the key
+        then greedyDict dict cipherText maxNeighbour else key -- Recursively calls itself until with the maxNeighour as the key
 
 
 
