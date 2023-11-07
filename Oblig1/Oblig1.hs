@@ -12,6 +12,7 @@ import Control.Applicative
 import Control.Monad.State
 import System.IO
 import System.Exit
+import GHC.Exts.Heap (GenClosure(key))
 
 -- | A data type to represent expressions that can be evaluated to a number.
 -- This type is parametric over both the number type and the cell reference type.
@@ -70,7 +71,9 @@ instance Ranged CellRef where
        = Dimension { columns :: [Char]
                    , rows :: [Integer] }
     cellRange dim ran
-        = _
+        = let validColumns = filter (\c -> c >= column (upperLeft ran) && c <= column (lowerRight ran)) (columns dim)
+              validRows = filter (\r -> r >= row (upperLeft ran) && r <= row (lowerRight ran)) (rows dim)
+              in Set.fromList [ Cell c r | c <- validColumns, r <- validRows ]
 
 -- | A sample spreadsheet using Double for numeric type
 sheet1 :: Sheet Double CellRef
@@ -78,7 +81,7 @@ sheet1 =
   Sheet
     { name = "Sheet1", -- ^ Name of the sheet
       dimension = Dimension "ABC" [1..3],
-      content = 
+      content =
         Map.fromList
           [ ((Cell 'A' 1), Constant 12),
             ((Cell 'B' 1), Mul (Ref (Cell 'A' 1)) (Ref (Cell 'A' 2))),
@@ -95,7 +98,20 @@ sheet1 =
     }
 
 sheet2 :: Sheet Double CellRef
-sheet2 = _
+sheet2 =
+  Sheet
+  { name = "Sheet2",
+    dimension = Dimension "ABC" [1..2],
+    content =
+      Map.fromList
+        [ ((Cell 'A' 1), Constant 12),
+          ((Cell 'B' 1), Mul (Constant 4) (Ref (Cell 'A' 2))),
+          ((Cell 'C' 1), Add (Ref (Cell 'A' 1)) (Ref (Cell 'C' 2))),
+          ((Cell 'A' 2), Constant 2),
+          ((Cell 'B' 2), Constant 4),
+          ((Cell 'C' 2), Sum (Box (Cell 'A' 1) (Cell 'C' 1)))
+        ]
+  }
 
 -- | Evaluate an expression within the context of a sheet.
 -- Return Nothing if the expression cannot be evaluated.
@@ -103,8 +119,35 @@ evaluate :: (Num number, Ranged cell)
          => Sheet number cell
          -> Expression number cell
          -> Maybe number
-evaluate sheet expr = _
+--If the expression is a reference to another cell
+evaluate sheet (Ref cell) =
+  case Map.lookup cell (content sheet) of
+    Just expr -> evaluate sheet expr
+    Nothing   -> Nothing --The referenced cell is not found
 
+--If the expression is a constant number
+evaluate _ (Constant n) = Just n
+
+--If the expression is the sum of cells
+evaluate sheet (Sum range) =
+  case maybeValues of
+    Just values -> do
+      results <- mapM (evaluate sheet) values
+      Just $ sum results
+    Nothing -> Nothing
+  where
+    maybeValues = traverse (\x -> Map.lookup x $ content sheet) $ Set.toList cells
+    cells = cellRange (dimension sheet) range
+
+--If the expression is addition of two expressions
+evaluate sheet (Add expr1 expr2)
+  | Just result1 <- evaluate sheet expr1, Just result2 <- evaluate sheet expr2 = Just $ result1 + result2
+  | otherwise = Nothing
+
+--If the expression is multiplication of two expressions
+evaluate sheet (Mul expr1 expr2)
+  | Just result1 <- evaluate sheet expr1, Just result2 <- evaluate sheet expr2 = Just $ result1 * result2
+  | otherwise = Nothing
 
 -- The type of parsers
 newtype Parser a = Parser {runParser :: String -> Maybe (String, a)}
@@ -136,7 +179,6 @@ instance Alternative Parser where
   empty = Parser $ const Nothing
   p <|> q = Parser $ \s -> runParser p s <|> runParser q s
 
-
 -- A set of utility parsers
 
 -- | Parse a single character
@@ -145,9 +187,11 @@ pChar = Parser pHead where
    pHead "" = Nothing
    pHead (c:cs) = Just (cs , c)
 
-
+-- | Get a single character
 exactChar :: Char -> Parser ()
-exactChar = _
+exactChar expectedChar= do
+  c <- pChar
+  guard (c == expectedChar)
 
 -- | Eat a single space
 pSpace :: Parser ()
@@ -160,7 +204,7 @@ pNewLine :: Parser ()
 pNewLine = do
    c <- pChar
    guard (c == '\n')
-   
+
 -- | Parse a keyword
 keyword :: String -> Parser ()
 keyword [] = return ()
@@ -169,9 +213,13 @@ keyword (k : ks) = do
     guard (c == k)
     keyword ks
 
-   
+-- | Parse content within paranthesis and brackets
 between :: Parser a -> Parser b -> Parser c -> Parser c
-between pOpen pClose pContent = _
+between pOpen pClose pContent = do
+    inParenthesis pOpen
+    x <- pContent
+    inParenthesis pClose
+    return x
 
 -- | Parse parenthesis
 inParenthesis :: Parser a -> Parser a
@@ -211,7 +259,7 @@ pRead =
 -- | Parse cell expressions
 pExpression :: (Read number)
             => Parser (Expression number CellRef)
-pExpression = _
+pExpression = do pAdd
 
 -- | Parse an atomic term
 pTerm :: Read number => Parser (Expression number CellRef)
@@ -222,29 +270,40 @@ pTerm =  inParenthesis pExpression
 
 -- | Parse a numeric constant
 pConstant :: (Read number) => Parser (Expression number cell)
-pConstant = Constant <$> pRead
+pConstant = do
+    Constant <$> pRead
 
 -- | Parse a cell name
 pCell :: Parser CellRef
-pCell = _
+pCell = do
+    col <- pColName
+    Cell col <$> pRowNumber
 
 -- | Parse a cell reference
 pRef :: Parser (Expression number CellRef)
-pRef = _
+pRef = do
+    keyword "!"
+    Ref <$> pCell
 
 
 -- | Parse a multiplication expression
 pMul :: Read number => Parser (Expression number CellRef)
-pMul = _
+pMul = pOperator "*" Mul pTerm
 
 -- | Parse an addition expression
 pAdd :: Read number => Parser (Expression number CellRef)
-pAdd = _
+pAdd = pOperator "+" Add pMul
 
 
 -- | Parse a sum of cell refences like SUM(A1:C3)
 pSum :: Parser (Expression number CellRef)
-pSum = _
+pSum = do
+    keyword "SUM("
+    c1 <- pCell
+    keyword ":"
+    c2 <- pCell
+    keyword ")"
+    return $ Sum $ Box c1 c2
 
 -- Now follows parsers for the sheet structure itself
 
@@ -309,13 +368,13 @@ instance (Show number) => Show (Sheet number CellRef) where
                                          | c <- columns (dimension sheet)]
                               | r <- rows (dimension sheet)]
     maxWidths = (maximum . map genericLength) <$> transpose printedRows
-                       
+
 --  | Read a spreadsheet from file, evaluate and print it
 getSpreadSheet :: FilePath -> IO (Sheet Double CellRef)
 getSpreadSheet file = do
    unparsed <- readFile file
    case runParser pSheet unparsed of
-      Nothing -> do 
+      Nothing -> do
                   hPutStrLn stderr "No spreadsheet found"
                   exitWith (ExitFailure 1)
       (Just (_, sheet)) -> return sheet
